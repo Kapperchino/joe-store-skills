@@ -13,14 +13,14 @@ npx skills add Kapperchino/joe-store-skills
 
 The skill works with the agents supported by the
 [skills CLI](https://skills.sh/docs). It requires macOS, Node.js 22 or newer,
-and Brave Browser installed in `/Applications`.
+and a Chromium-based default browser.
 
 ## What it does
 
 The bundled zero-dependency Node.js script:
 
-1. Opens the joe-store login page in a temporary Brave profile when
-   authentication is required.
+1. Opens the joe-store login page in a temporary profile in the user's default
+   browser when authentication is required.
 2. Caches the resulting Supabase access token at `~/.joestore/token.json`.
 3. Finds the current project's latest Claude Code transcript, or accepts an
    explicit Claude Code or OpenAI JSONL transcript path.

@@ -10,7 +10,7 @@ session transcript to joe-store's `PUT /session` endpoint.
 
 ## Requirements
 
-- macOS with Brave Browser installed at `/Applications/Brave Browser.app`
+- macOS with a Chromium-based default browser
 - Node.js 22 or newer
 
 ## Workflow
@@ -31,9 +31,9 @@ session transcript to joe-store's `PUT /session` endpoint.
    node <skill-directory>/scripts/joestore.mjs upload /path/to/session.jsonl
    ```
 
-3. If Brave opens, tell the user to complete the joe-store login. Keep the
-   command running while they sign in. It waits up to five minutes, then prints
-   the server's JSON response on success.
+3. If the default browser opens, tell the user to complete the joe-store login.
+   Keep the command running while they sign in. It waits up to five minutes,
+   then prints the server's JSON response on success.
 4. Report the returned session ID or the exact error to the user. Never print
    or expose the cached access token.
 
@@ -44,10 +44,11 @@ use `openai`; all other paths use `claude`.
 
 ## Authentication
 
-On first use, the script opens the joe-store login page in a temporary Brave
-profile. It reads the Supabase access token from the page after login and stores
-it at `~/.joestore/token.json`. Later uploads reuse a valid cached token. If the
-server returns `401`, the script prompts for login once and retries.
+On first use, the script opens the joe-store login page in a temporary profile
+in the user's default browser. It reads the Supabase access token from the page
+after login and stores it at `~/.joestore/token.json`. Later uploads reuse a
+valid cached token. If the server returns `401`, the script prompts for login
+once and retries.
 
 Use these commands when needed:
 
@@ -65,6 +66,8 @@ node <skill-directory>/scripts/joestore.mjs token
 - `JOESTORE_LOGIN_URL`: login URL; defaults to the hosted joe-store frontend
 - `JOESTORE_PROVIDER`: set to `claude` or `openai` to override path-based
   provider detection
+- `JOESTORE_BROWSER`: optional path to a Chromium-based browser executable;
+  overrides the macOS default browser
 
 The temporary browser profile is deleted when authentication finishes. The
-script does not modify the user's normal Brave profile.
+script does not modify the user's normal browser profile.

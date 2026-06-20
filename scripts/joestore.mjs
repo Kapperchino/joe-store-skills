@@ -8,10 +8,11 @@
 //   node joestore.mjs token                  print the cached token's status
 //
 // Zero npm dependencies: uses Node's built-in fetch + WebSocket (Node >= 22)
-// and drives a real browser over the Chrome DevTools Protocol so the user can
-// log in interactively, then reads the Supabase session out of localStorage.
+// and drives the user's default browser over the Chrome DevTools Protocol so
+// the user can log in interactively, then reads the Supabase session out of
+// localStorage.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +20,6 @@ import { join } from "node:path";
 const LOGIN_URL = process.env.JOESTORE_LOGIN_URL || "https://joe-store-frontend.onrender.com/login";
 const SERVER_URL = (process.env.JOESTORE_URL || "https://joe-store.onrender.com").replace(/\/+$/, "");
 const TOKEN_PATH = join(homedir(), ".joestore", "token.json");
-const BRAVE = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------- token store
@@ -77,7 +77,9 @@ async function waitForBrowser(port) {
     } catch {}
     await sleep(250);
   }
-  throw new Error("browser did not expose a DevTools endpoint in time");
+  throw new Error(
+    "the default browser did not expose a DevTools endpoint; use a Chromium-based default browser or set JOESTORE_BROWSER"
+  );
 }
 
 async function findPageTarget(port) {
@@ -91,6 +93,64 @@ async function findPageTarget(port) {
     await sleep(250);
   }
   throw new Error("no page target found");
+}
+
+function defaultBrowserBundleId() {
+  if (process.platform !== "darwin") {
+    throw new Error("automatic default-browser detection currently requires macOS");
+  }
+
+  const exported = spawnSync("defaults", [
+    "export",
+    "com.apple.LaunchServices/com.apple.launchservices.secure",
+    "-",
+  ]);
+  if (exported.status !== 0) {
+    throw new Error("could not read the macOS default-browser setting");
+  }
+
+  const converted = spawnSync("plutil", ["-convert", "json", "-o", "-", "-"], {
+    input: exported.stdout,
+    encoding: "utf8",
+  });
+  if (converted.status !== 0) {
+    throw new Error("could not parse the macOS default-browser setting");
+  }
+
+  let handlers;
+  try {
+    handlers = JSON.parse(converted.stdout).LSHandlers;
+  } catch {
+    throw new Error("macOS returned an invalid default-browser setting");
+  }
+
+  const handler = handlers?.find((entry) =>
+    entry.LSHandlerContentType === "com.apple.default-app.web-browser" && entry.LSHandlerRoleAll
+  ) ?? handlers?.find((entry) =>
+    entry.LSHandlerURLScheme === "https" && entry.LSHandlerRoleAll
+  );
+  if (!handler) throw new Error("no default HTTPS browser is configured");
+  return handler.LSHandlerRoleAll;
+}
+
+function launchBrowser(port, userDir) {
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    LOGIN_URL,
+  ];
+  const override = process.env.JOESTORE_BROWSER;
+
+  if (override) {
+    return spawn(override, args, { stdio: "ignore" });
+  }
+
+  const bundleId = defaultBrowserBundleId();
+  return spawn("open", ["-n", "-b", bundleId, "--args", ...args], {
+    stdio: "ignore",
+  });
 }
 
 // Runs in the browser: pull the access_token out of localStorage. The joe-store
@@ -121,18 +181,10 @@ const EXTRACT_EXPR = `(() => {
 })()`;
 
 async function interactiveLogin() {
-  if (!existsSync(BRAVE)) {
-    throw new Error(`browser not found at ${BRAVE} (set up Brave or adjust the BRAVE path in the script)`);
-  }
   const port = 9000 + Math.floor(Math.random() * 1000);
   const userDir = mkdtempSync(join(tmpdir(), "joestore-login-"));
-  const proc = spawn(BRAVE, [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${userDir}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    LOGIN_URL,
-  ], { stdio: "ignore" });
+  const proc = launchBrowser(port, userDir);
+  let ws;
 
   const cleanup = () => {
     try { proc.kill(); } catch {}
@@ -142,7 +194,7 @@ async function interactiveLogin() {
   try {
     await waitForBrowser(port);
     const target = await findPageTarget(port);
-    const ws = new WebSocket(target.webSocketDebuggerUrl);
+    ws = new WebSocket(target.webSocketDebuggerUrl);
     const pending = { nextId: 1, map: new Map() };
     ws.addEventListener("message", (ev) => {
       const data = JSON.parse(ev.data);
@@ -169,13 +221,17 @@ async function interactiveLogin() {
       }).catch(() => null);
       const token = res?.result?.value;
       if (token) {
-        ws.close();
         return token;
       }
       await sleep(1500);
     }
     throw new Error("timed out waiting for login");
   } finally {
+    if (ws?.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ id: 0, method: "Browser.close" })); } catch {}
+      await sleep(500);
+      try { ws.close(); } catch {}
+    }
     cleanup();
   }
 }
