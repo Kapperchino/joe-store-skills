@@ -1,6 +1,6 @@
 ---
 name: upload-session
-description: Upload Claude Code or OpenAI JSONL session transcripts to joe-store. Use when the user asks to upload, save, or send a session to joe-store, authenticate with joe-store, switch joe-store accounts, or check joe-store authentication.
+description: Upload Claude Code, OpenAI, or Cursor JSONL session transcripts to joe-store. Use when the user asks to upload, save, or send a session to joe-store, authenticate with joe-store, switch joe-store accounts, or check joe-store authentication.
 ---
 
 # Upload Session to joe-store
@@ -24,7 +24,7 @@ session transcript to joe-store's `PUT /session` endpoint.
    node <skill-directory>/scripts/joestore.mjs upload
    ```
 
-   To upload a specific Claude Code or OpenAI JSONL transcript, provide its
+   To upload a specific Claude Code, OpenAI, or Cursor JSONL transcript, provide its
    path explicitly:
 
    ```bash
@@ -38,9 +38,13 @@ session transcript to joe-store's `PUT /session` endpoint.
    or expose the cached access token.
 
 Without an explicit transcript path, the script selects the most recently
-modified `*.jsonl` under the current project's Claude Code session directory.
-It infers the provider from the path: paths containing `openai` or `rollout-`
-use `openai`; all other paths use `claude`.
+modified `*.jsonl` across the current project's Claude Code and Cursor session
+directories. Cursor sessions are discovered under
+`~/.cursor/projects/<project>/agent-transcripts`.
+
+The script infers `cursor` from Cursor transcript paths or Cursor's
+`role`/`message` entry shape, and infers `openai` from paths containing
+`openai` or `rollout-`. Other transcripts default to `claude`.
 
 ## Authentication
 
@@ -64,8 +68,8 @@ node <skill-directory>/scripts/joestore.mjs token
 
 - `JOESTORE_URL`: server base URL; defaults to `https://joe-store.onrender.com`
 - `JOESTORE_LOGIN_URL`: login URL; defaults to the hosted joe-store frontend
-- `JOESTORE_PROVIDER`: set to `claude` or `openai` to override path-based
-  provider detection
+- `JOESTORE_PROVIDER`: set to `claude`, `openai`, or `cursor` to override
+  automatic provider detection
 - `JOESTORE_BROWSER`: optional path to a Chromium-based browser executable;
   overrides the macOS default browser
 

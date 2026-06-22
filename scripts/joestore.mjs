@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // joestore.mjs — log in to the joe-store frontend once, cache the Supabase
-// access token locally, and upload Claude/OpenAI session transcripts.
+// access token locally, and upload Claude/OpenAI/Cursor session transcripts.
 //
 // Usage:
 //   node joestore.mjs upload [sessionPath]   ensure token (login if needed), upload
@@ -253,24 +253,70 @@ function encodeProjectDir(cwd) {
   return cwd.replace(/[/.]/g, "-");
 }
 
-function defaultSessionPath() {
-  const dir = join(homedir(), ".claude", "projects", encodeProjectDir(process.cwd()));
-  if (!existsSync(dir)) throw new Error(`no session directory for this project at ${dir}`);
-  const files = readdirSync(dir)
-    .filter((f) => f.endsWith(".jsonl"))
-    .map((f) => ({ f, m: statSync(join(dir, f)).mtimeMs }))
-    .sort((a, b) => b.m - a.m);
-  if (!files.length) throw new Error(`no .jsonl session files in ${dir}`);
-  return join(dir, files[0].f);
+function findJsonlFiles(dir, recursive = false) {
+  if (!existsSync(dir)) return [];
+
+  const files = [];
+  const pending = [dir];
+  while (pending.length) {
+    const current = pending.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory() && recursive) {
+        pending.push(path);
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        files.push({ path, mtimeMs: statSync(path).mtimeMs });
+      }
+    }
+  }
+  return files;
 }
 
-function detectProvider(path) {
+function defaultSessionPath() {
+  const encodedProject = encodeProjectDir(process.cwd());
+  const claudeDir = join(homedir(), ".claude", "projects", encodedProject);
+  const cursorDir = join(
+    homedir(),
+    ".cursor",
+    "projects",
+    encodedProject.replace(/^-+/, ""),
+    "agent-transcripts",
+  );
+  const files = [
+    ...findJsonlFiles(claudeDir),
+    ...findJsonlFiles(cursorDir, true),
+  ].sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  if (!files.length) {
+    throw new Error(
+      `no Claude or Cursor .jsonl session files for this project; checked ${claudeDir} and ${cursorDir}`,
+    );
+  }
+  return files[0].path;
+}
+
+function detectProvider(path, data) {
+  if (
+    /(?:^|[\\/])\.cursor(?:[\\/]|$)|(?:^|[\\/])agent-transcripts(?:[\\/]|$)/i.test(path)
+  ) {
+    return "cursor";
+  }
   if (/openai/i.test(path) || /rollout-/i.test(path)) return "openai";
+
+  const firstEntry = data.find((entry) => entry && typeof entry === "object");
+  if (
+    firstEntry &&
+    !("type" in firstEntry) &&
+    (firstEntry.role === "user" || firstEntry.role === "assistant") &&
+    firstEntry.message &&
+    Array.isArray(firstEntry.message.content)
+  ) {
+    return "cursor";
+  }
   return "claude";
 }
 
 function buildPayload(path) {
-  const provider = process.env.JOESTORE_PROVIDER || detectProvider(path);
   const data = readFileSync(path, "utf8")
     .split("\n")
     .map((l) => l.trim())
@@ -280,6 +326,10 @@ function buildPayload(path) {
       catch (e) { throw new Error(`line ${i + 1} of ${path} is not valid JSON: ${e.message}`); }
     });
   if (!data.length) throw new Error(`session ${path} has no entries`);
+  const provider = process.env.JOESTORE_PROVIDER || detectProvider(path, data);
+  if (!["claude", "openai", "cursor"].includes(provider)) {
+    throw new Error("JOESTORE_PROVIDER must be claude, openai, or cursor");
+  }
   return { provider, payload: { session: { type: provider, data } } };
 }
 

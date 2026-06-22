@@ -2,8 +2,8 @@
 
 [![skills.sh](https://skills.sh/b/Kapperchino/joe-store-skills)](https://skills.sh/Kapperchino/joe-store-skills)
 
-An agent skill for uploading Claude Code and OpenAI JSONL session transcripts
-to [joe-store](https://joe-store-frontend.onrender.com).
+An agent skill for uploading Claude Code, OpenAI, and Cursor JSONL session
+transcripts to [joe-store](https://joe-store-frontend.onrender.com).
 
 ## Install
 
@@ -22,8 +22,8 @@ The bundled zero-dependency Node.js script:
 1. Opens the joe-store login page in a temporary profile in the user's default
    browser when authentication is required.
 2. Caches the resulting Supabase access token at `~/.joestore/token.json`.
-3. Finds the current project's latest Claude Code transcript, or accepts an
-   explicit Claude Code or OpenAI JSONL transcript path.
+3. Finds the current project's latest Claude Code or Cursor transcript, or
+   accepts an explicit Claude Code, OpenAI, or Cursor JSONL transcript path.
 4. Uploads the transcript to joe-store.
 
 Review [SKILL.md](SKILL.md) for the complete agent workflow and configuration.
