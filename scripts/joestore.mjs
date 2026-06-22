@@ -7,15 +7,19 @@
 //   node joestore.mjs login                  force an interactive browser login
 //   node joestore.mjs token                  print the cached token's status
 //
-// Zero npm dependencies: uses Node's built-in fetch + WebSocket (Node >= 22)
-// and drives the user's default browser over the Chrome DevTools Protocol so
-// the user can log in interactively, then reads the Supabase session out of
-// localStorage.
+// Zero npm dependencies. Authentication uses a loopback OAuth flow: the script
+// starts a one-shot HTTP server on a random 127.0.0.1 port, opens the joe-store
+// login page in the user's normal browser, and the frontend redirects back to
+// http://127.0.0.1:<port>/callback?access_token=<jwt>&state=<state> once the
+// user has signed in. The token is exchanged entirely over loopback and never
+// leaves the local machine.
 
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
 
 const LOGIN_URL = process.env.JOESTORE_LOGIN_URL || "https://joe-store-frontend.onrender.com/login";
 const SERVER_URL = (process.env.JOESTORE_URL || "https://joe-store.onrender.com").replace(/\/+$/, "");
@@ -38,7 +42,7 @@ function saveToken(accessToken) {
   const rec = { access_token: accessToken, stored_at: Math.floor(Date.now() / 1000) };
   const exp = jwtExpiry(accessToken);
   if (exp) rec.expires_at = exp;
-  writeFileSync(TOKEN_PATH, JSON.stringify(rec, null, 2));
+  writeFileSync(TOKEN_PATH, JSON.stringify(rec, null, 2), { mode: 0o600 });
 }
 
 function jwtExpiry(token) {
@@ -57,182 +61,90 @@ function tokenValid(rec) {
   return Date.now() / 1000 < exp - 60; // 60s safety margin
 }
 
-// ------------------------------------------------------------------ CDP login
+// ------------------------------------------------------- loopback OAuth login
+//
+// A one-shot loopback server receives the access token that the joe-store
+// frontend hands back after the user signs in. The login page is opened with
+// the system's normal URL handler (open / xdg-open / start), so any browser
+// works. The token arrives over 127.0.0.1 only; the script reads nothing out
+// of the browser itself.
 
-async function cdpSend(ws, pending, method, params = {}) {
-  const id = pending.nextId++;
-  const msg = JSON.stringify({ id, method, params });
-  return new Promise((resolve, reject) => {
-    pending.map.set(id, { resolve, reject });
-    ws.send(msg);
+const SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>joe-store</title></head>
+<body style="font-family:system-ui,sans-serif;text-align:center;padding-top:4rem;color:#111">
+<h1>&#10003; Signed in to joe-store</h1>
+<p>You can close this tab and return to your terminal.</p>
+</body></html>`;
+
+function openUrl(url) {
+  // The command is always a constant; the user can only influence arguments, never
+  // which executable runs. JOESTORE_BROWSER is passed to `open -a` as an app name,
+  // so it never lands in the command position (no arbitrary-executable surface).
+  const browserApp = process.env.JOESTORE_BROWSER;
+  let cmd, args;
+  if (process.platform === "darwin") {
+    cmd = "open";
+    args = browserApp ? ["-a", browserApp, url] : [url];
+  } else if (process.platform === "win32") {
+    cmd = "cmd";
+    args = ["/c", "start", "", url];
+  } else {
+    cmd = "xdg-open";
+    args = [url];
+  }
+  spawn(cmd, args, { stdio: "ignore" }).on("error", () => {
+    console.error(`Could not open a browser automatically. Open this URL manually:\n${url}`);
   });
 }
 
-async function waitForBrowser(port) {
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (r.ok) return;
-    } catch {}
-    await sleep(250);
-  }
-  throw new Error(
-    "the default browser did not expose a DevTools endpoint; use a Chromium-based default browser or set JOESTORE_BROWSER"
-  );
-}
-
-async function findPageTarget(port) {
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
-    try {
-      const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
-      const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
-      if (page) return page;
-    } catch {}
-    await sleep(250);
-  }
-  throw new Error("no page target found");
-}
-
-function defaultBrowserBundleId() {
-  if (process.platform !== "darwin") {
-    throw new Error("automatic default-browser detection currently requires macOS");
-  }
-
-  const exported = spawnSync("defaults", [
-    "export",
-    "com.apple.LaunchServices/com.apple.launchservices.secure",
-    "-",
-  ]);
-  if (exported.status !== 0) {
-    throw new Error("could not read the macOS default-browser setting");
-  }
-
-  const converted = spawnSync("plutil", ["-convert", "json", "-o", "-", "-"], {
-    input: exported.stdout,
-    encoding: "utf8",
-  });
-  if (converted.status !== 0) {
-    throw new Error("could not parse the macOS default-browser setting");
-  }
-
-  let handlers;
-  try {
-    handlers = JSON.parse(converted.stdout).LSHandlers;
-  } catch {
-    throw new Error("macOS returned an invalid default-browser setting");
-  }
-
-  const handler = handlers?.find((entry) =>
-    entry.LSHandlerContentType === "com.apple.default-app.web-browser" && entry.LSHandlerRoleAll
-  ) ?? handlers?.find((entry) =>
-    entry.LSHandlerURLScheme === "https" && entry.LSHandlerRoleAll
-  );
-  if (!handler) throw new Error("no default HTTPS browser is configured");
-  return handler.LSHandlerRoleAll;
-}
-
-function launchBrowser(port, userDir) {
-  const args = [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${userDir}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    LOGIN_URL,
-  ];
-  const override = process.env.JOESTORE_BROWSER;
-
-  if (override) {
-    return spawn(override, args, { stdio: "ignore" });
-  }
-
-  const bundleId = defaultBrowserBundleId();
-  return spawn("open", ["-n", "-b", bundleId, "--args", ...args], {
-    stdio: "ignore",
+// Starts an HTTP server bound to a random loopback port. Resolves once it is
+// listening; `token` settles when the frontend hits /callback with a token that
+// matches the expected CSRF state.
+function startCallbackServer(expectedState) {
+  return new Promise((resolveServer) => {
+    let settle;
+    const token = new Promise((res, rej) => { settle = { res, rej }; });
+    const server = createServer((req, res) => {
+      const url = new URL(req.url, "http://127.0.0.1");
+      if (url.pathname !== "/callback") {
+        res.writeHead(404).end();
+        return;
+      }
+      const accessToken = url.searchParams.get("access_token");
+      const state = url.searchParams.get("state");
+      if (!accessToken || state !== expectedState) {
+        res.writeHead(400, { "content-type": "text/html" });
+        res.end("<h1>Login failed</h1><p>Missing token or state mismatch. You can close this tab.</p>");
+        settle.rej(new Error("login callback was missing a token or had a mismatched state"));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(SUCCESS_HTML);
+      settle.res(accessToken);
+    });
+    server.listen(0, "127.0.0.1", () => {
+      resolveServer({ server, port: server.address().port, token });
+    });
   });
 }
-
-// Runs in the browser: pull the access_token out of localStorage. The joe-store
-// frontend stores the raw JWT under 'joe-store.auth.access-token' (see
-// src/lib/auth.ts). Fall back to the Supabase session JSON (custom storageKey or
-// default 'sb-*-auth-token'), handling chunked (`.0/.1`) and `base64-` values.
-const EXTRACT_EXPR = `(() => {
-  const direct = localStorage.getItem('joe-store.auth.access-token');
-  if (direct) return direct;
-  const keys = Object.keys(localStorage).filter(k =>
-    k === 'joe-store.auth.session' || (k.startsWith('sb-') && k.includes('-auth-token')));
-  const groups = {};
-  for (const k of keys) {
-    const m = k.match(/^(.*?)(?:\\.(\\d+))?$/);
-    if (!m) continue;
-    (groups[m[1]] = groups[m[1]] || []).push({ k, idx: m[2] === undefined ? -1 : +m[2] });
-  }
-  for (const base of Object.keys(groups)) {
-    const parts = groups[base];
-    let raw = parts.length === 1 && parts[0].idx === -1
-      ? localStorage.getItem(parts[0].k)
-      : parts.filter(p => p.idx >= 0).sort((a,b)=>a.idx-b.idx).map(p=>localStorage.getItem(p.k)).join('');
-    if (!raw) continue;
-    if (raw.startsWith('base64-')) { try { raw = atob(raw.slice(7)); } catch { continue; } }
-    try { const o = JSON.parse(raw); if (o && o.access_token) return o.access_token; } catch {}
-  }
-  return null;
-})()`;
 
 async function interactiveLogin() {
-  const port = 9000 + Math.floor(Math.random() * 1000);
-  const userDir = mkdtempSync(join(tmpdir(), "joestore-login-"));
-  const proc = launchBrowser(port, userDir);
-  let ws;
+  const state = randomBytes(16).toString("hex");
+  const { server, port, token } = await startCallbackServer(state);
+  const loginUrl = new URL(LOGIN_URL);
+  loginUrl.searchParams.set("cli_redirect", `http://127.0.0.1:${port}/callback`);
+  loginUrl.searchParams.set("state", state);
 
-  const cleanup = () => {
-    try { proc.kill(); } catch {}
-    try { rmSync(userDir, { recursive: true, force: true }); } catch {}
-  };
+  console.error("\n>>> Opening the joe-store login page in your browser.");
+  console.error(">>> Waiting for sign-in to complete (Ctrl-C to cancel)...\n");
+  openUrl(loginUrl.toString());
 
+  const timeout = new Promise((_, rej) =>
+    setTimeout(() => rej(new Error("timed out waiting for login")), LOGIN_TIMEOUT_MS).unref()
+  );
   try {
-    await waitForBrowser(port);
-    const target = await findPageTarget(port);
-    ws = new WebSocket(target.webSocketDebuggerUrl);
-    const pending = { nextId: 1, map: new Map() };
-    ws.addEventListener("message", (ev) => {
-      const data = JSON.parse(ev.data);
-      if (data.id && pending.map.has(data.id)) {
-        const { resolve, reject } = pending.map.get(data.id);
-        pending.map.delete(data.id);
-        data.error ? reject(new Error(data.error.message)) : resolve(data.result);
-      }
-    });
-    await new Promise((res, rej) => {
-      ws.addEventListener("open", res, { once: true });
-      ws.addEventListener("error", () => rej(new Error("CDP websocket error")), { once: true });
-    });
-    await cdpSend(ws, pending, "Runtime.enable");
-
-    console.error("\n>>> A browser window opened. Log in at the joe-store frontend.");
-    console.error(">>> Waiting for sign-in to complete (Ctrl-C to cancel)...\n");
-
-    const deadline = Date.now() + LOGIN_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const res = await cdpSend(ws, pending, "Runtime.evaluate", {
-        expression: EXTRACT_EXPR,
-        returnByValue: true,
-      }).catch(() => null);
-      const token = res?.result?.value;
-      if (token) {
-        return token;
-      }
-      await sleep(1500);
-    }
-    throw new Error("timed out waiting for login");
+    return await Promise.race([token, timeout]);
   } finally {
-    if (ws?.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ id: 0, method: "Browser.close" })); } catch {}
-      await sleep(500);
-      try { ws.close(); } catch {}
-    }
-    cleanup();
+    server.close();
   }
 }
 
@@ -365,10 +277,6 @@ async function upload(sessionPath) {
 }
 
 // ----------------------------------------------------------------------- main
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 async function main() {
   const [cmd, arg] = process.argv.slice(2);
