@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // joestore.mjs — log in to the joe-store frontend once, cache the Supabase
-// access token locally, and upload Claude/OpenAI/Cursor session transcripts.
+// access token locally, and upload the invoking agent's session transcript.
 //
 // Usage:
 //   node joestore.mjs upload [sessionPath]   ensure token (login if needed), upload
@@ -15,16 +15,33 @@
 // leaves the local machine.
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 
 const LOGIN_URL = process.env.JOESTORE_LOGIN_URL || "https://joe-store-frontend.onrender.com/login";
+const FRONTEND_URL = (process.env.JOESTORE_FRONTEND_URL || new URL(LOGIN_URL).origin).replace(/\/+$/, "");
 const SERVER_URL = (process.env.JOESTORE_URL || "https://joe-store.onrender.com").replace(/\/+$/, "");
 const TOKEN_PATH = join(homedir(), ".joestore", "token.json");
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+
+const AGENTS = {
+  claude: { label: "Claude Code", provider: "claude" },
+  codex: { label: "Codex", provider: "openai" },
+  cursor: { label: "Cursor", provider: "cursor" },
+};
 
 // ---------------------------------------------------------------- token store
 
@@ -184,38 +201,158 @@ function findJsonlFiles(dir, recursive = false) {
   return files;
 }
 
-function defaultSessionPath() {
+function normalizeAgent(value) {
+  const agent = value?.toLowerCase();
+  return agent && Object.hasOwn(AGENTS, agent) ? agent : null;
+}
+
+function pathHasPart(path, part) {
+  return new RegExp(`(?:^|[\\\\/])${part.replace(".", "\\.")}(?:[\\\\/]|$)`, "i").test(path);
+}
+
+function detectCurrentAgent() {
+  const fromEnv = normalizeAgent(process.env.JOESTORE_AGENT);
+  if (fromEnv) return fromEnv;
+  if (process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX || process.env.CODEX_MANAGED_PACKAGE_ROOT) {
+    return "codex";
+  }
+  if (process.env.CLAUDECODE || process.env.CLAUDE_CODE_ENTRYPOINT || process.env.CLAUDE_CODE_SSE_PORT) {
+    return "claude";
+  }
+  if (process.env.CURSOR_TRACE_ID || process.env.CURSOR_AGENT || process.env.CURSOR_SESSION_ID) {
+    return "cursor";
+  }
+
+  const scriptPath = new URL(import.meta.url).pathname;
+  if (pathHasPart(scriptPath, ".codex")) return "codex";
+  if (pathHasPart(scriptPath, ".claude")) return "claude";
+  if (pathHasPart(scriptPath, ".cursor")) return "cursor";
+  return null;
+}
+
+function currentAgentOrThrow() {
+  const agent = detectCurrentAgent();
+  if (!agent) {
+    throw new Error(
+      "could not determine the current agent; set JOESTORE_AGENT to claude, codex, or cursor",
+    );
+  }
+  return agent;
+}
+
+function parseFirstJsonLine(path) {
+  let fd;
+  let first = "";
+  const buffer = Buffer.alloc(64 * 1024);
+  try {
+    fd = openSync(path, "r");
+    while (true) {
+      const bytes = readSync(fd, buffer, 0, buffer.length, null);
+      if (!bytes) break;
+      const chunk = buffer.toString("utf8", 0, bytes);
+      const newline = chunk.indexOf("\n");
+      if (newline === -1) {
+        first += chunk;
+      } else {
+        first += chunk.slice(0, newline);
+        break;
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  first = first.trim();
+  if (!first) return null;
+  try {
+    return JSON.parse(first);
+  } catch {
+    return null;
+  }
+}
+
+function codexSessionMeta(path) {
+  const entry = parseFirstJsonLine(path);
+  return entry?.type === "session_meta" && entry.payload ? entry.payload : null;
+}
+
+function codexSessionMatchesProject(file) {
+  const meta = codexSessionMeta(file.path);
+  return meta?.cwd === process.cwd();
+}
+
+function codexSessionMatchesThread(file) {
+  const threadId = process.env.CODEX_THREAD_ID;
+  if (!threadId) return false;
+  if (file.path.includes(threadId)) return true;
+  const meta = codexSessionMeta(file.path);
+  return meta?.session_id === threadId || meta?.id === threadId;
+}
+
+function defaultClaudeSessionPath() {
   const encodedProject = encodeProjectDir(process.cwd());
   const claudeDir = join(homedir(), ".claude", "projects", encodedProject);
-  const cursorDir = join(
-    homedir(),
-    ".cursor",
-    "projects",
-    encodedProject.replace(/^-+/, ""),
-    "agent-transcripts",
-  );
-  const files = [
-    ...findJsonlFiles(claudeDir),
-    ...findJsonlFiles(cursorDir, true),
-  ].sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const files = findJsonlFiles(claudeDir).sort((a, b) => b.mtimeMs - a.mtimeMs);
 
   if (!files.length) {
     throw new Error(
-      `no Claude or Cursor .jsonl session files for this project; checked ${claudeDir} and ${cursorDir}`,
+      `no Claude Code .jsonl session files for this project; checked ${claudeDir}`,
     );
   }
   return files[0].path;
 }
 
-function detectProvider(path, data) {
+function defaultCodexSessionPath() {
+  const codexDir = join(homedir(), ".codex", "sessions");
+  const files = findJsonlFiles(codexDir, true).sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const threadMatch = files.find(codexSessionMatchesThread);
+  if (threadMatch) return threadMatch.path;
+
+  const projectMatch = files.find(codexSessionMatchesProject);
+  if (projectMatch) return projectMatch.path;
+
+  throw new Error(`no Codex .jsonl session files for this project; checked ${codexDir}`);
+}
+
+function defaultCursorSessionPath() {
+  const encodedProject = encodeProjectDir(process.cwd()).replace(/^-+/, "");
+  const cursorDir = join(homedir(), ".cursor", "projects", encodedProject, "agent-transcripts");
+  const files = findJsonlFiles(cursorDir, true).sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  if (!files.length) {
+    throw new Error(`no Cursor .jsonl session files for this project; checked ${cursorDir}`);
+  }
+  return files[0].path;
+}
+
+function defaultSessionPath(agent) {
+  switch (agent) {
+    case "claude":
+      return defaultClaudeSessionPath();
+    case "codex":
+      return defaultCodexSessionPath();
+    case "cursor":
+      return defaultCursorSessionPath();
+    default:
+      throw new Error(`unsupported agent: ${agent}`);
+  }
+}
+
+function detectSessionAgent(path, data) {
+  if (pathHasPart(path, ".codex") || /(?:^|[\\/])rollout-[^\\/]+\.jsonl$/i.test(path)) {
+    return "codex";
+  }
   if (
     /(?:^|[\\/])\.cursor(?:[\\/]|$)|(?:^|[\\/])agent-transcripts(?:[\\/]|$)/i.test(path)
   ) {
     return "cursor";
   }
-  if (/openai/i.test(path) || /rollout-/i.test(path)) return "openai";
 
   const firstEntry = data.find((entry) => entry && typeof entry === "object");
+  if (firstEntry?.type === "session_meta" && /^codex/i.test(firstEntry.payload?.originator || "")) {
+    return "codex";
+  }
   if (
     firstEntry &&
     !("type" in firstEntry) &&
@@ -228,7 +365,11 @@ function detectProvider(path, data) {
   return "claude";
 }
 
-function buildPayload(path) {
+function providerForAgent(agent) {
+  return AGENTS[agent]?.provider;
+}
+
+function buildPayload(path, currentAgent) {
   const data = readFileSync(path, "utf8")
     .split("\n")
     .map((l) => l.trim())
@@ -238,19 +379,79 @@ function buildPayload(path) {
       catch (e) { throw new Error(`line ${i + 1} of ${path} is not valid JSON: ${e.message}`); }
     });
   if (!data.length) throw new Error(`session ${path} has no entries`);
-  const provider = process.env.JOESTORE_PROVIDER || detectProvider(path, data);
+  const sessionAgent = detectSessionAgent(path, data);
+  if (currentAgent && sessionAgent !== currentAgent) {
+    throw new Error(
+      `${AGENTS[currentAgent].label} can only upload ${AGENTS[currentAgent].label} sessions; got ${AGENTS[sessionAgent].label} transcript ${path}`,
+    );
+  }
+  const provider = process.env.JOESTORE_PROVIDER || providerForAgent(sessionAgent);
   if (!["claude", "openai", "cursor"].includes(provider)) {
     throw new Error("JOESTORE_PROVIDER must be claude, openai, or cursor");
   }
-  return { provider, payload: { session: { type: provider, data } } };
+  return {
+    agent: sessionAgent,
+    provider,
+    payload: { session: { type: provider, data } },
+  };
+}
+
+function candidateSessionIds(value) {
+  if (!value || typeof value !== "object") return [];
+  const ids = [];
+  for (const key of ["session_url", "url", "link"]) {
+    const raw = value[key];
+    if (typeof raw === "string") {
+      const match = raw.match(/\/session\/([^/?#]+)/);
+      if (match) ids.push(decodeURIComponent(match[1]));
+    }
+  }
+  for (const key of ["session_id", "sessionId", "id"]) {
+    if (typeof value[key] === "string" || typeof value[key] === "number") {
+      ids.push(String(value[key]));
+    }
+  }
+  for (const key of ["session", "data"]) {
+    ids.push(...candidateSessionIds(value[key]));
+  }
+  return ids;
+}
+
+function sessionUrl(id) {
+  return `${FRONTEND_URL}/session/${encodeURIComponent(id)}`;
+}
+
+function enrichUploadResponse(text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return text;
+  }
+
+  if (typeof body === "string" || typeof body === "number") {
+    const id = String(body);
+    return { id, session_url: sessionUrl(id) };
+  }
+
+  if (!body || typeof body !== "object") return body;
+  const id = candidateSessionIds(body)[0];
+  if (!id) return body;
+  return { ...body, session_url: sessionUrl(id) };
+}
+
+function printUploadResponse(text) {
+  const body = enrichUploadResponse(text);
+  console.log(typeof body === "string" ? body : JSON.stringify(body, null, 2));
 }
 
 async function upload(sessionPath) {
-  const path = sessionPath || defaultSessionPath();
-  const { provider, payload } = buildPayload(path);
+  const currentAgent = currentAgentOrThrow();
+  const path = sessionPath || defaultSessionPath(currentAgent);
+  const { agent, provider, payload } = buildPayload(path, currentAgent);
   const token = await ensureToken();
 
-  console.error(`Uploading ${payload.session.data.length} ${provider} entries from ${path} -> ${SERVER_URL}/session`);
+  console.error(`Uploading ${payload.session.data.length} ${AGENTS[agent].label} entries from ${path} -> ${SERVER_URL}/session`);
   const res = await fetch(`${SERVER_URL}/session`, {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -269,11 +470,11 @@ async function upload(sessionPath) {
     });
     const retryText = await retry.text();
     if (!retry.ok) throw new Error(`upload failed (${retry.status}): ${retryText}`);
-    console.log(retryText);
+    printUploadResponse(retryText);
     return;
   }
   if (!res.ok) throw new Error(`upload failed (${res.status}): ${text}`);
-  console.log(text);
+  printUploadResponse(text);
 }
 
 // ----------------------------------------------------------------------- main

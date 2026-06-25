@@ -1,12 +1,12 @@
 ---
 name: upload
-description: Upload Claude Code, OpenAI, or Cursor JSONL session transcripts to joe-store. Use when the user asks to upload, save, or send a session to joe-store, authenticate with joe-store, switch joe-store accounts, or check joe-store authentication.
+description: Upload the current agent's Claude Code, Codex, or Cursor JSONL session transcript to joe-store. Use when the user asks to upload, save, or send this agent's session to joe-store, authenticate with joe-store, switch joe-store accounts, or check joe-store authentication.
 ---
 
 # Upload Session to joe-store
 
-Use the bundled `scripts/joestore.mjs` command to authenticate and upload a
-session transcript to joe-store's `PUT /session` endpoint.
+Use the bundled `scripts/joestore.mjs` command to authenticate and upload this
+agent's own session transcript to joe-store's `PUT /session` endpoint.
 
 ## Requirements
 
@@ -24,8 +24,13 @@ session transcript to joe-store's `PUT /session` endpoint.
    node <skill-directory>/scripts/joestore.mjs upload
    ```
 
-   To upload a specific Claude Code, OpenAI, or Cursor JSONL transcript, provide its
-   path explicitly:
+   The default upload is intentionally scoped to the agent running the skill:
+   Claude Code uploads Claude Code sessions, Codex uploads Codex sessions, and
+   Cursor uploads Cursor sessions. The agent must not upload another agent's
+   transcript by default.
+
+   To upload a specific transcript for the same agent, provide its path
+   explicitly:
 
    ```bash
    node <skill-directory>/scripts/joestore.mjs upload /path/to/session.jsonl
@@ -33,18 +38,21 @@ session transcript to joe-store's `PUT /session` endpoint.
 
 3. If the default browser opens, tell the user to complete the joe-store login.
    Keep the command running while they sign in. It waits up to five minutes,
-   then prints the server's JSON response on success.
-4. Report the returned session ID or the exact error to the user. Never print
-   or expose the cached access token.
+   then prints the server's JSON response on success. When the response contains
+   a session ID, the script adds `session_url` using the public frontend route
+   `https://joe-store-frontend.onrender.com/session/{id}`.
+4. Report the returned `session_url` and session ID, or the exact error, to the
+   user. Never print or expose the cached access token.
 
-Without an explicit transcript path, the script selects the most recently
-modified `*.jsonl` across the current project's Claude Code and Cursor session
-directories. Cursor sessions are discovered under
-`~/.cursor/projects/<project>/agent-transcripts`.
+Without an explicit transcript path, the script detects the current agent and
+selects that agent's session only. Claude Code sessions are discovered under
+`~/.claude/projects/<project>`, Codex sessions under `~/.codex/sessions`, and
+Cursor sessions under `~/.cursor/projects/<project>/agent-transcripts`.
 
-The script infers `cursor` from Cursor transcript paths or Cursor's
-`role`/`message` entry shape, and infers `openai` from paths containing
-`openai` or `rollout-`. Other transcripts default to `claude`.
+For Codex, the script first uses `CODEX_THREAD_ID` when available, then falls
+back to the most recently modified Codex session whose metadata `cwd` matches
+the current project. If an explicit transcript path belongs to a different
+agent, the script refuses to upload it.
 
 ## Authentication
 
@@ -71,6 +79,10 @@ node <skill-directory>/scripts/joestore.mjs token
 
 - `JOESTORE_URL`: server base URL; defaults to `https://joe-store.onrender.com`
 - `JOESTORE_LOGIN_URL`: login URL; defaults to the hosted joe-store frontend
+- `JOESTORE_FRONTEND_URL`: frontend base URL used to print `session_url`;
+  defaults to the origin of `JOESTORE_LOGIN_URL`
+- `JOESTORE_AGENT`: set to `claude`, `codex`, or `cursor` if automatic current
+  agent detection is unavailable
 - `JOESTORE_PROVIDER`: set to `claude`, `openai`, or `cursor` to override
   automatic provider detection
 - `JOESTORE_BROWSER`: optional macOS application name or path used to open the
