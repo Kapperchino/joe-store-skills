@@ -27,4 +27,8 @@ The bundled zero-dependency Node.js script:
    accepts an explicit Claude Code, OpenAI, or Cursor JSONL transcript path.
 4. Uploads the transcript to joe-store.
 
-Review [SKILL.md](SKILL.md) for the complete agent workflow and configuration.
+The packaged skill lives under `skills/upload/` so the installer copies
+`SKILL.md`, `scripts/`, and `docs/` together.
+
+Review [skills/upload/SKILL.md](skills/upload/SKILL.md) for the complete agent
+workflow and configuration.
