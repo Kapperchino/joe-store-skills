@@ -1,5 +1,5 @@
 ---
-name: upload-session
+name: upload
 description: Upload Claude Code, OpenAI, or Cursor JSONL session transcripts to joe-store. Use when the user asks to upload, save, or send a session to joe-store, authenticate with joe-store, switch joe-store accounts, or check joe-store authentication.
 ---
 
