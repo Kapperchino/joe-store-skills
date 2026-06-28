@@ -36,7 +36,7 @@ agent's own session transcript to joe-store's `PUT /session` endpoint.
    node <skill-directory>/scripts/joestore.mjs upload /path/to/session.jsonl
    ```
 
-3. The upload request includes the transcript's `session_uuid` alongside the
+3. The upload request includes the transcript's `session_id` alongside the
    `session` payload. The script extracts this UUID from transcript metadata
    such as `sessionId` or Codex `session_meta.payload.id`, falling back to a UUID
    in the transcript filename.

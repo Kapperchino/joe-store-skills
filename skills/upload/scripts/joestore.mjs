@@ -442,7 +442,7 @@ function buildPayload(path, currentAgent) {
     agent: sessionAgent,
     provider,
     sessionUuid,
-    payload: { session_uuid: sessionUuid, session: { type: provider, data } },
+    payload: { session: { type: provider, data }, session_id: sessionUuid },
   };
 }
 
