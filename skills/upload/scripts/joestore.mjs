@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 
@@ -369,6 +369,54 @@ function providerForAgent(agent) {
   return AGENTS[agent]?.provider;
 }
 
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+function uuidFromString(value) {
+  if (typeof value !== "string") return null;
+  return value.match(UUID_RE)?.[0] || null;
+}
+
+function sessionUuidFromEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+
+  const candidates = [
+    entry.session_uuid,
+    entry.sessionUuid,
+    entry.session_id,
+    entry.sessionId,
+    entry.metadata?.session_uuid,
+    entry.metadata?.sessionUuid,
+    entry.metadata?.session_id,
+    entry.metadata?.sessionId,
+  ];
+
+  if (entry.type === "session_meta" && entry.payload && typeof entry.payload === "object") {
+    candidates.push(
+      entry.payload.session_uuid,
+      entry.payload.sessionUuid,
+      entry.payload.session_id,
+      entry.payload.sessionId,
+      entry.payload.id,
+    );
+  }
+
+  return candidates.map(uuidFromString).find(Boolean) || null;
+}
+
+function sessionUuidFromTranscript(path, data) {
+  for (const entry of data) {
+    const uuid = sessionUuidFromEntry(entry);
+    if (uuid) return uuid;
+  }
+
+  const fromPath = uuidFromString(basename(path)) || uuidFromString(path);
+  if (fromPath) return fromPath;
+
+  throw new Error(
+    `could not determine a session UUID from ${path}; expected transcript metadata such as sessionId or session_meta.payload.id`,
+  );
+}
+
 function buildPayload(path, currentAgent) {
   const data = readFileSync(path, "utf8")
     .split("\n")
@@ -389,10 +437,12 @@ function buildPayload(path, currentAgent) {
   if (!["claude", "openai", "cursor"].includes(provider)) {
     throw new Error("JOESTORE_PROVIDER must be claude, openai, or cursor");
   }
+  const sessionUuid = sessionUuidFromTranscript(path, data);
   return {
     agent: sessionAgent,
     provider,
-    payload: { session: { type: provider, data } },
+    sessionUuid,
+    payload: { session_uuid: sessionUuid, session: { type: provider, data } },
   };
 }
 
@@ -406,7 +456,7 @@ function candidateSessionIds(value) {
       if (match) ids.push(decodeURIComponent(match[1]));
     }
   }
-  for (const key of ["session_id", "sessionId", "id"]) {
+  for (const key of ["session_uuid", "sessionUuid", "session_id", "sessionId", "id"]) {
     if (typeof value[key] === "string" || typeof value[key] === "number") {
       ids.push(String(value[key]));
     }
@@ -448,10 +498,10 @@ function printUploadResponse(text) {
 async function upload(sessionPath) {
   const currentAgent = currentAgentOrThrow();
   const path = sessionPath || defaultSessionPath(currentAgent);
-  const { agent, provider, payload } = buildPayload(path, currentAgent);
+  const { agent, provider, sessionUuid, payload } = buildPayload(path, currentAgent);
   const token = await ensureToken();
 
-  console.error(`Uploading ${payload.session.data.length} ${AGENTS[agent].label} entries from ${path} -> ${SERVER_URL}/session`);
+  console.error(`Uploading ${payload.session.data.length} ${AGENTS[agent].label} entries for session ${sessionUuid} from ${path} -> ${SERVER_URL}/session`);
   const res = await fetch(`${SERVER_URL}/session`, {
     method: "PUT",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },

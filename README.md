@@ -26,9 +26,9 @@ The bundled zero-dependency Node.js script:
 3. Finds only the invoking agent's session transcript: Claude Code uploads
    Claude Code sessions, Codex uploads Codex sessions, and Cursor uploads Cursor
    sessions.
-4. Uploads the transcript to joe-store and prints a frontend link at
-   `https://joe-store-frontend.onrender.com/session/{id}` when the server
-   returns a session ID.
+4. Uploads the transcript to joe-store with its `session_uuid` and prints a
+   frontend link at `https://joe-store-frontend.onrender.com/session/{id}` when
+   the server returns a session UUID or ID.
 
 The packaged skill lives under `skills/upload/` so the installer copies
 `SKILL.md`, `scripts/`, and `docs/` together.

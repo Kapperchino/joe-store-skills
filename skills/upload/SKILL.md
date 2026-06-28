@@ -36,13 +36,17 @@ agent's own session transcript to joe-store's `PUT /session` endpoint.
    node <skill-directory>/scripts/joestore.mjs upload /path/to/session.jsonl
    ```
 
-3. If the default browser opens, tell the user to complete the joe-store login.
+3. The upload request includes the transcript's `session_uuid` alongside the
+   `session` payload. The script extracts this UUID from transcript metadata
+   such as `sessionId` or Codex `session_meta.payload.id`, falling back to a UUID
+   in the transcript filename.
+4. If the default browser opens, tell the user to complete the joe-store login.
    Keep the command running while they sign in. It waits up to five minutes,
    then prints the server's JSON response on success. When the response contains
-   a session ID, the script adds `session_url` using the public frontend route
-   `https://joe-store-frontend.onrender.com/session/{id}`.
-4. Report the returned `session_url` and session ID, or the exact error, to the
-   user. Never print or expose the cached access token.
+   a session UUID or ID, the script adds `session_url` using the public frontend
+   route `https://joe-store-frontend.onrender.com/session/{id}`.
+5. Report the returned `session_url` and session UUID or ID, or the exact error,
+   to the user. Never print or expose the cached access token.
 
 Without an explicit transcript path, the script detects the current agent and
 selects that agent's session only. Claude Code sessions are discovered under
