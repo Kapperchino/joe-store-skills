@@ -33,7 +33,7 @@ import { randomBytes } from "node:crypto";
 
 const LOGIN_URL = process.env.JOESTORE_LOGIN_URL || "https://joe-store-frontend.fly.dev/login";
 const FRONTEND_URL = (process.env.JOESTORE_FRONTEND_URL || new URL(LOGIN_URL).origin).replace(/\/+$/, "");
-const SERVER_URL = (process.env.JOESTORE_URL || "https://joe-store-frontend.fly.dev").replace(/\/+$/, "");
+const SERVER_URL = (process.env.JOESTORE_URL || "https://joe-store.fly.dev").replace(/\/+$/, "");
 const TOKEN_PATH = join(homedir(), ".joestore", "token.json");
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 
